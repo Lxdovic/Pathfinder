@@ -1,16 +1,35 @@
-import { THREE, OrbitControls, MapControls, TransformControls } from './imports.js'
+import { THREE, MapControls, TransformControls } from './imports.js'
 
 let scene = new THREE.Scene()
-let camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 10000)
-let renderer = new THREE.WebGLRenderer({ powerPreference: "high-performance"})
+let camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 8000)
+let renderer = new THREE.WebGLRenderer({ powerPreference: 'high-performance'})
 let controls = new MapControls(camera, renderer.domElement)
-let startControls = new TransformControls(camera, renderer.domElement)
-let targetControls = new TransformControls(camera, renderer.domElement)
+let playerControls = new TransformControls(camera, renderer.domElement)
 
-var raycaster = new THREE.Raycaster()
-var mouse = new THREE.Vector2()
-var grid, gui, start, target, meshStart, meshTarget, gui_params
-var path = []
+var bot, player, grid
+const red = new THREE.Color(0xff0000)
+const green = new THREE.Color(0x00ff00)
+const blue = new THREE.Color(0x0000ff)
+const white = new THREE.Color(0xCCCCCC)
+
+var config = {
+    showAStar: false,
+    toggleShowAStar: function() {
+        this.showAStar = !this.showAStar
+        
+        for (var n of grid.nodes) {
+            if (this.showAStar) {
+                if (n.walkable) scene.add(n.mesh)
+                scene.remove(grid.plane)
+            }
+
+            else {
+                if (n.walkable) scene.remove(n.mesh)
+                scene.add(grid.plane)
+            }
+        }
+    }
+}
 
 document.body.onload = () => {
     renderer.setSize(window.innerWidth, window.innerHeight)
@@ -20,284 +39,332 @@ document.body.onload = () => {
 
     scene.add(new THREE.AmbientLight(0xffffff, 1))
 
-    const light = new THREE.DirectionalLight( 0xffffff, 0.5 )
-    light.position.set( 300, 300, 300 )
+    const light = new THREE.DirectionalLight( 0xffdddd, 0.5)
     light.castShadow = true
-    light.target.position.set(0, 0, 0)
-    light.shadow.camera.visible = true
-    light.shadow.camera.near = 2
-    light.shadow.camera.far = 600
-    light.shadow.camera.left = -500
-    light.shadow.camera.right = 500
-    light.shadow.camera.top = 500
-    light.shadow.camera.bottom = -500
     scene.add(light)
 
-    camera.position.set(-300, 200, 120)
-    controls.target.set(300, 0, 120)
+    camera.position.set(-400, 2000, 500)
+    controls.target.set(1000, 0, 1000)
 
-    init()
-}
+    grid = new Grid(50, 50, 100)
+    player = new Player()
+    bot = new Bot()
 
-async function startSearch() {
-    if (path != 'failed') {
-        for (var i = 0; i < path.length; i++) {
-            path[i].mesh.material.color = new THREE.Color(0xCCCCCC)
-        }
-    }
+    player.closeNode = grid.pointToNode(player.mesh.position)
+    bot.closeNode = grid.pointToNode(bot.mesh.position)
 
-    path = await findpath(start, target)
+    player.closeNode.mesh.material.color = blue
 
-    if (path != 'failed') {
-        for (var i = 0; i < path.length; i++) {
-            path[i].mesh.material.color = new THREE.Color(0xff0033)
-        }
-    }
-}
-
-function init() {
-    grid = new Grid(30)
-    gui = new dat.GUI()
-
-    gui_params = {
-        diagonals: false,
-        toggleDiagonals: function() {
-            this.diagonals = !this.diagonals
-        }
-    }
-
-    gui.add(gui_params, 'toggleDiagonals').name('toggleDiagonals')
-
-    startControls.attach(meshStart)
-    startControls.addEventListener( 'dragging-changed', function ( event ) {
+    playerControls.attach(player.mesh)
+    
+    playerControls.addEventListener( 'dragging-changed', function ( event ) {
         controls.enabled = ! event.value
-        startSearch()
+    })
+    
+    playerControls.addEventListener( 'mouseUp', function ( event ) {
+        player.closeNode.mesh.material.color = white
+        player.closeNode = grid.pointToNode(player.mesh.position)
+        bot.closeNode = grid.pointToNode(bot.mesh.position)
+        player.closeNode.mesh.material.color = blue
+
+
+        if (bot.animation) {
+            bot.animation.onComplete(() => {
+                bot.animation = false
+                bot.currentNode = 0
+                bot.path = findPath(bot.closeNode, player.closeNode, grid)
+            })
+        }
+        
+        else {
+            bot.currentNode = 0
+            bot.path = findPath(bot.closeNode, player.closeNode, grid)
+        }
     })
 
-    startControls.addEventListener('change', function(event) {
-        startSearch()
-    })
+	playerControls.showY = false
+    
+    scene.add(playerControls)
 
-	startControls.showY = false
+    bot.path = findPath(bot.closeNode, player.closeNode, grid)
 
-    targetControls.attach(meshTarget)
-    targetControls.addEventListener( 'dragging-changed', function ( event ) {
-        controls.enabled = ! event.value
-        startSearch()
-    })
-
-    targetControls.addEventListener('change', function(event) {
-        startSearch()
-    })
-
-	targetControls.showY = false
-
-    scene.add(startControls)
-    scene.add(targetControls)
+    var gui = new dat.GUI()
+    
+    gui.add(config, 'toggleShowAStar').name('Show / Hide AStar')
 
     requestAnimationFrame(render)
 }
 
-function findpath(startNode, targetNode) {
-    
-    return new Promise((resolve, reject) => {
-        var openNodes = []
-        var closedNodes = []
+function findPath(startNode, endNode, grid) {
+    if (startNode.id == endNode.id) { return [] }
 
-        openNodes.push(startNode)
-        
-        while (openNodes.length > 0) {
-            var currentNode = openNodes[0]
-            var currentNodeIndex = 0
+    for (var i = 0; i < grid.nodes.length; i++) {
+        if (grid.nodes[i].walkable) {
+            grid.nodes[i].mesh.material.color = white
+        }
+    }
 
-            for (var i = 1; i < openNodes.length; i++) {
-                if (openNodes[i].fCost < currentNode.fCost || openNodes[i].fCost == currentNode.fCost && openNodes[i].hCost < currentNode.hCost) {
-                    currentNode = openNodes[i]
-                    currentNodeIndex = i
-                }
-            }
+    var startTime = performance.now()
 
-            openNodes.splice(currentNodeIndex, 1)
-            closedNodes.push(currentNode)
+    var openSet = []
+    var closedSet = []
 
-            if (currentNode.id == targetNode.id) {
-                resolve(retracePath(startNode, targetNode))
-            }
+    openSet.push(startNode)
 
-            var neighbours = grid.getNeighbours(currentNode)
+    while (openSet.length > 0) {
+        var currentNode = openSet[0]
+        var currentNodeIndex = 0
 
-            for (var i = 0; i < neighbours.length; i++) {
-                if (!neighbours[i]) { continue }
-
-                var isClosed = false;
-                
-                for (var j = 0; j < closedNodes.length; j++) {
-                    if (closedNodes[j].id == neighbours[i].id) {
-                        isClosed = true
-                    }
-                }
-
-                if (!neighbours[i].walkable || isClosed) {
-                    continue;
-                }
-
-                var isOpened = false
-
-                for (var j = 0; j < openNodes.length; j++) {
-                    if (openNodes[j].id == neighbours[i].id) {
-                        isOpened = true
-                    }
-                }
-
-                var newMovementCost = currentNode.gCost + currentNode.mesh.position.distanceTo(neighbours[i].mesh.position)
-
-                if (newMovementCost < neighbours[i].gCost || !isOpened) {
-                    neighbours[i].gCost = newMovementCost
-                    neighbours[i].hCost = neighbours[i].mesh.position.distanceTo(targetNode.mesh.position)
-                    neighbours[i].fCost = neighbours[i].gCost + neighbours[i].hCost
-                    neighbours[i].parent = currentNode
-
-                    if (!isOpened) {
-                        openNodes.push(neighbours[i])
-                    }
-                }
+        for (var i = 1; i < openSet.length; i++) {
+            if (openSet[i].fCost < currentNode.fCost || openSet[i].fCost == currentNode.fCost && openSet[i].hCost < currentNode.hCost) {
+                currentNode = openSet[i]
+                currentNodeIndex = i
             }
         }
 
-        resolve('failed')
-    })
+        openSet.splice(currentNodeIndex, 1)
+        closedSet.push(currentNode)
+        currentNode.mesh.material.color = blue
+
+        if (currentNode.id == endNode.id) {
+            console.log(performance.now() - startTime)
+            return tracePath(startNode, endNode)
+        }
+
+        var neighbours = grid.getNeighbours(currentNode)
+
+        for (var neighbour of neighbours) {
+            var isClosed = false
+
+            for (var n of closedSet) {
+                if (n.id == neighbour.id) {
+                    isClosed = true; break
+                }
+            }
+
+            if (isClosed || !neighbour.walkable) {
+                continue
+            }
+
+            var isOpened = false
+
+            for (var n of openSet) {
+                if (n.id == neighbour.id) {
+                    isOpened = true; break
+                }
+            }
+
+            var movementCost = currentNode.gCost + currentNode.mesh.position.distanceTo(neighbour.mesh.position)
+
+            if (movementCost < neighbour.gCost || !isOpened) {
+                neighbour.gCost = movementCost
+                neighbour.hCost = neighbour.mesh.position.distanceTo(endNode.mesh.position)
+                neighbour.fCost = neighbour.gCost + neighbour.hCost
+                neighbour.parent = currentNode
+
+                if (!isOpened) {
+                    openSet.push(neighbour)
+
+                    neighbour.mesh.material.color = red
+                }
+            }
+        }
+    }
 }
 
-function retracePath(startNode, endNode) {
+function tracePath(startNode, endNode) {
     var path = []
     var currentNode = endNode
 
     while (currentNode.id != startNode.id) {
         path.push(currentNode)
-
+        currentNode.mesh.material.color = green
         currentNode = currentNode.parent
     }
 
     return path.reverse()
 }
 
-function getNodeFromPos(pos) {
-    var min = Infinity
-    var node
-
-    for (var i = 0; i < grid.nodes.length; i++) {
-        if (!grid.nodes[i].walkable) { continue }
-        
-        var dist = grid.nodes[i].mesh.position.distanceTo(pos)
-
-        if (dist < min) {
-            min = dist
-            node = grid.nodes[i]
-        }
-    }
-
-    return node
-}
-
 function render() {
     requestAnimationFrame(render)
 
-    start = getNodeFromPos(meshStart.position)
-    target = getNodeFromPos(meshTarget.position)
-
     controls.update()
+    
+    if (!bot.animation && bot.path && bot.path.length > 0) {
+        var pos = new THREE.Vector3().copy(bot.path[bot.currentNode].mesh.position)
+        pos.y += 25
+
+        bot.animation = new TWEEN.Tween(bot.mesh)
+            .to({position: pos}, 80)
+            .onComplete(() => {
+                bot.animation = false 
+                if (bot.currentNode < bot.path.length - 1) { bot.currentNode++; }
+            })
+            .start()
+    }
 
     TWEEN.update()
 
     renderer.render(scene, camera)
 }
 
-class Node {
-    constructor(w, x, y, z, f, g, h, id) {
-        this.walkable = w
-        this.mesh = new THREE.Mesh(new THREE.BoxGeometry(10, 1, 10), new THREE.MeshLambertMaterial({ color: (w ? 0xCCCCCC : 0x333333) }))
-        this.mesh.position.set(x, y, z)
-        this.mesh.nodeId = id
-        this.fCost = f
-        this.gCost = g
-        this.hCost = h
-        this.id = id
-        this.parent
+class Bot {
+    constructor() {
+        this.mesh = new THREE.Mesh(new THREE.BoxGeometry(50, 50, 50), new THREE.MeshLambertMaterial({ color: 0xff23aa }))
+        this.mesh.castShadow = true
+        this.mesh.receiveShadow = true
+        this.mesh.position.set(0, 25, 0)
+        this.path = []
+        this.currentNode = 0
+        this.animation
+        this.closeNode
 
         scene.add(this.mesh)
     }
 }
 
+class Player {
+    constructor() {
+        this.mesh = new THREE.Mesh(new THREE.BoxGeometry(50, 50, 50), new THREE.MeshLambertMaterial({ color: 0x06ffaa }))
+        this.mesh.castShadow = true
+        this.mesh.receiveShadow = true
+        this.mesh.position.set(0, 25, 0)
+        
+        scene.add(this.mesh)
+    }
+}
+
+class Node {
+    constructor(w, x, y, z, id, r) {
+        this.walkable = w
+        this.mesh = new THREE.Mesh(new THREE.BoxGeometry(r, w ? 1 : 100, r), new THREE.MeshLambertMaterial({ color: (w ? 0xCCCCCC : 0x333333) }))
+        this.mesh.position.set(x, w ? y : y + 50, z)
+        this.mesh.castShadow = true
+        this.mesh.receiveShadow = true
+        this.fCost = 0
+        this.gCost = 0
+        this.hCost = 0
+        this.id = id
+        this.parent
+
+        if (!w && !config.showAStar) {
+            scene.add(this.mesh)
+        }
+    }
+}
+
 class Grid {
-    constructor(size) {
-        this.size = size
+    constructor(sizeX, sizeY, r) {
+        this.sizeX = sizeX
+        this.sizeY = sizeY
+        this.nodeRadius = r
         this.nodes = []
 
-        for (var i = 0; i < size; i++) {
-            for (var j = 0; j < size; j++) {
-                var isWalkable = Math.random() > 0.3
-                var node = new Node(
-                    isWalkable,
-                    i * 10,
-                    0,
-                    j * 10,
-                    0,
-                    0,
-                    0,
-                    this.nodes.length
-                )
+        if (!config.showAStar) {
+            this.plane = new THREE.Mesh(new THREE.PlaneGeometry(sizeX * r, sizeY * r), new THREE.MeshLambertMaterial({ color: 0xCCCCCC }))
+            this.plane.rotation.x = -Math.PI / 2
+            this.plane.position.set((sizeX * r) / 2 - r / 2, 0, (sizeY * r) / 2 - r / 2)
+            scene.add(this.plane)
+        }
 
-                if (!isWalkable) {
-                    node.mesh.scale.y = 10
-                    node.mesh.position.y += 5
-                    node.mesh.castShadow = true
-                }
+        for (var i = 0; i < this.sizeX; i++) {
+            for (var j = 0; j < this.sizeY; j++) {
 
-                else {
-                    if (!meshStart) {
-                        meshStart = new THREE.Mesh(new THREE.BoxGeometry(5, 5, 5), new THREE.MeshLambertMaterial({ color: 0x00ff00 }))
-                        meshStart.position.x = i * 10
-                        meshStart.position.y += 5
-                        meshStart.position.z = j * 10
-                        scene.add(meshStart)
-                    }
+                // var walkable = Math.random() > .35
+                var walkable = maze[this.nodes.length]
 
-                    else if (!meshTarget) {
-                        meshTarget = new THREE.Mesh(new THREE.BoxGeometry(5, 5, 5), new THREE.MeshLambertMaterial({ color: 0xff00ff }))
-                        meshTarget.position.x = i * 10
-                        meshTarget.position.y += 5
-                        meshTarget.position.z = j * 10
-                        scene.add(meshTarget)
-                    }
-                }
-
-                node.mesh.receiveShadow = true
-
-                this.nodes.push(node)
+                this.nodes.push(new Node(
+                    walkable, i * this.nodeRadius, 0, j * this.nodeRadius, this.nodes.length, this.nodeRadius
+                ))
             }
         }
 
-        this.getNeighbours = function(n) {
+        this.pointToNode = function(pos) {
+            var min = Infinity
+            var node
+
+            for (var i = 0; i < this.nodes.length; i++) {
+                if (!this.nodes[i].walkable) { continue }
+
+                var dist = this.nodes[i].mesh.position.distanceTo(pos)
+
+                if (dist < min) {
+                    min = dist
+                    node = this.nodes[i]
+                }
+            }
+
+            return node
+        }
+
+        this.getNeighbours = function(node) {
             var neighbours = []
 
-            neighbours.push(grid.nodes[n.id + 1])
-            neighbours.push(grid.nodes[n.id - 1])
-            neighbours.push(grid.nodes[n.id + grid.size])
-            neighbours.push(grid.nodes[n.id - grid.size])
-
-            if (gui_params.diagonals) {
-                neighbours.push(grid.nodes[n.id + grid.size + 1])
-                neighbours.push(grid.nodes[n.id - grid.size - 1])
-                neighbours.push(grid.nodes[n.id + grid.size - 1])
-                neighbours.push(grid.nodes[n.id - grid.size + 1])
-            }
-
-            for (var i = 0; i < neighbours.length; i++) {
-                if (!neighbours[i]) { continue }
-                if (!neighbours[i].walkable) { continue }
-            }
+            if (this.nodes[node.id + 1] && (node.id + 1) % this.sizeX != 0) {neighbours.push(this.nodes[node.id + 1])}
+            if (this.nodes[node.id - 1] && node.id % this.sizeX != 0) {neighbours.push(this.nodes[node.id - 1])}
+            if (this.nodes[node.id + this.sizeX]) {neighbours.push(this.nodes[node.id + this.sizeX])}
+            if (this.nodes[node.id - this.sizeX]) {neighbours.push(this.nodes[node.id - this.sizeX])}
 
             return neighbours
         }
     }
 }
+
+function clamp(min, max, val) {
+    if (val > max) { val = max }
+    if (val < min) { val = min }
+
+    return val
+}
+var maze = [
+    1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1,
+    0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1,
+    1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0,
+    1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1,
+    1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1,
+    1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1,
+    1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1,
+    1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+    1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1,
+    1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0,
+    0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0,
+    0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1,
+    1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1,
+    0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1,
+    1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1,
+    1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1,
+    1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1,
+    1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1,
+    1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+    1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+    0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1,
+    1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0,
+    1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1,
+    1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1,
+    1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1,
+    1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1,
+    1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0,
+    0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1,
+    1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1,
+    1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0,
+    1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+    0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1,
+    1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1,
+    0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1,
+    0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0,
+    1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1,
+    1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1,
+    1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1,
+    1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0,
+    1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1,
+    0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1,
+    0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+    0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1,
+    0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1,
+    1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1,
+]
